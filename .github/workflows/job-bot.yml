@@ -2,7 +2,7 @@ name: Job Bot
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -20,7 +20,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install discord.py python-dotenv
+          python -m pip install --upgrade pip
+          python -m pip install discord.py
 
       - name: Run Job Bot
         env:
