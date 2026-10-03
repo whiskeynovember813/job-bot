@@ -16,20 +16,15 @@ END_HOUR = 23
 BURSTS_PER_DAY = 4
 PINGS_PER_BURST = 5
 
-# How late a GitHub Actions run can be and still
-# consider a scheduled burst "due".
 MAX_LATE_MINUTES = 15
+
+STATE_FILE = "jobbot_state.txt"
 
 CHICAGO = ZoneInfo("America/Chicago")
 
 
 def generate_schedule(day):
-    """
-    Generate four deterministic random times for this date.
-
-    Using the date as the random seed means every GitHub
-    Actions run on the same day gets the exact same schedule.
-    """
+    """Generate the same four random times for the same date."""
 
     seed = int(day.strftime("%Y%m%d"))
     rng = random.Random(seed)
@@ -53,8 +48,6 @@ def generate_schedule(day):
 
 
 def format_time(minutes):
-    """Convert minutes after midnight to a readable time."""
-
     hour = minutes // 60
     minute = minutes % 60
 
@@ -71,11 +64,30 @@ def format_time(minutes):
     return f"{display_hour}:{minute:02d} {suffix}"
 
 
+def load_state():
+    """Read the last successfully sent burst."""
+
+    if not os.path.exists(STATE_FILE):
+        return None
+
+    try:
+        with open(STATE_FILE, "r") as file:
+            return file.read().strip()
+    except Exception:
+        return None
+
+
+def save_state(date_string, burst_number):
+    """Save the successfully sent burst."""
+
+    with open(STATE_FILE, "w") as file:
+        file.write(f"{date_string}|{burst_number}\n")
+
+
 async def send_pings():
     """Log into Discord and send five mentions."""
 
     intents = discord.Intents.default()
-
     client = discord.Client(intents=intents)
 
     @client.event
@@ -90,7 +102,6 @@ async def send_pings():
             mention = f"<@{FRIEND_ID}>"
 
             for number in range(1, PINGS_PER_BURST + 1):
-
                 await friend.send(mention)
 
                 print(
@@ -98,7 +109,6 @@ async def send_pings():
                     f"{number}/{PINGS_PER_BURST}"
                 )
 
-                # Short random delay between mentions.
                 if number < PINGS_PER_BURST:
                     await asyncio.sleep(
                         random.uniform(1, 3)
@@ -106,20 +116,19 @@ async def send_pings():
 
             print("Burst complete.")
 
+            return True
+
         except discord.Forbidden as error:
-            print(
-                f"Discord rejected the DM: {error}"
-            )
+            print(f"Discord rejected the DM: {error}")
+            return False
 
         except discord.HTTPException as error:
-            print(
-                f"Discord HTTP error: {error}"
-            )
+            print(f"Discord HTTP error: {error}")
+            return False
 
         except Exception as error:
-            print(
-                f"Unexpected error: {error}"
-            )
+            print(f"Unexpected error: {error}")
+            return False
 
         finally:
             await client.close()
@@ -133,6 +142,7 @@ def main():
     now_chicago = now_utc.astimezone(CHICAGO)
 
     today = now_chicago.date()
+    date_string = today.isoformat()
 
     current_minutes = (
         now_chicago.hour * 60
@@ -143,7 +153,7 @@ def main():
 
     print(
         f"Today's Job Bot schedule "
-        f"({today} Chicago time):"
+        f"({date_string} Chicago time):"
     )
 
     for number, scheduled_time in enumerate(
@@ -160,8 +170,13 @@ def main():
         f"{now_chicago.strftime('%I:%M:%S %p')}"
     )
 
-    # Find a burst that is currently due or was missed
-    # by up to MAX_LATE_MINUTES.
+    state = load_state()
+
+    if state:
+        print(f"Last successful burst: {state}")
+    else:
+        print("No burst has been recorded yet today.")
+
     due_burst = None
 
     for number, scheduled_time in enumerate(
@@ -169,9 +184,7 @@ def main():
         start=1
     ):
 
-        difference = (
-            current_minutes - scheduled_time
-        )
+        difference = current_minutes - scheduled_time
 
         if 0 <= difference <= MAX_LATE_MINUTES:
             due_burst = (
@@ -184,10 +197,17 @@ def main():
         print("\nNo burst is due right now.")
         return
 
-    number, scheduled_time = due_burst
+    burst_number, scheduled_time = due_burst
+
+    # Prevent the same burst from being sent twice.
+    if state == f"{date_string}|{burst_number}":
+        print(
+            f"\nBurst {burst_number} was already sent today."
+        )
+        return
 
     print(
-        f"\nBurst {number} is due!"
+        f"\nBurst {burst_number} is due!"
     )
 
     print(
@@ -195,11 +215,21 @@ def main():
         f"{format_time(scheduled_time)}"
     )
 
-    print(
-        "Sending five mentions..."
-    )
+    print("\nSending five mentions...")
 
-    asyncio.run(send_pings())
+    success = asyncio.run(send_pings())
+
+    if success:
+        save_state(date_string, burst_number)
+
+        print(
+            f"Recorded Burst {burst_number} as sent."
+        )
+    else:
+        print(
+            "Burst was not recorded because "
+            "the DM attempt failed."
+        )
 
 
 if __name__ == "__main__":
