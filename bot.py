@@ -1,8 +1,11 @@
 import os
 import random
-from datetime import datetime, timedelta, timezone
+import asyncio
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import discord
+
 
 TOKEN = os.environ["DISCORD_TOKEN"]
 FRIEND_ID = int(os.environ["FRIEND_ID"])
@@ -13,39 +16,63 @@ END_HOUR = 23
 BURSTS_PER_DAY = 4
 PINGS_PER_BURST = 5
 
+# How late a GitHub Actions run can be and still
+# consider a scheduled burst "due".
+MAX_LATE_MINUTES = 15
+
+CHICAGO = ZoneInfo("America/Chicago")
+
 
 def generate_schedule(day):
-    """Generate four deterministic random times for a particular day."""
+    """
+    Generate four deterministic random times for this date.
+
+    Using the date as the random seed means every GitHub
+    Actions run on the same day gets the exact same schedule.
+    """
 
     seed = int(day.strftime("%Y%m%d"))
     rng = random.Random(seed)
 
-    start_minutes = START_HOUR * 60
-    end_minutes = END_HOUR * 60
+    start_minute = START_HOUR * 60
+    end_minute = END_HOUR * 60
 
     while True:
-        minutes = sorted(
+        times = sorted(
             rng.sample(
-                range(start_minutes, end_minutes),
+                range(start_minute, end_minute),
                 BURSTS_PER_DAY
             )
         )
 
         if all(
-            minutes[i + 1] - minutes[i] >= 60
+            times[i + 1] - times[i] >= 60
             for i in range(BURSTS_PER_DAY - 1)
         ):
-            return minutes
+            return times
 
 
-def get_current_time():
-    """Return current UTC time."""
+def format_time(minutes):
+    """Convert minutes after midnight to a readable time."""
 
-    return datetime.now(timezone.utc)
+    hour = minutes // 60
+    minute = minutes % 60
+
+    suffix = "AM"
+
+    if hour >= 12:
+        suffix = "PM"
+
+    display_hour = hour % 12
+
+    if display_hour == 0:
+        display_hour = 12
+
+    return f"{display_hour}:{minute:02d} {suffix}"
 
 
-async def send_mentions():
-    """Log in, DM the friend five times, then disconnect."""
+async def send_pings():
+    """Log into Discord and send five mentions."""
 
     intents = discord.Intents.default()
 
@@ -63,6 +90,7 @@ async def send_mentions():
             mention = f"<@{FRIEND_ID}>"
 
             for number in range(1, PINGS_PER_BURST + 1):
+
                 await friend.send(mention)
 
                 print(
@@ -70,16 +98,28 @@ async def send_mentions():
                     f"{number}/{PINGS_PER_BURST}"
                 )
 
+                # Short random delay between mentions.
+                if number < PINGS_PER_BURST:
+                    await asyncio.sleep(
+                        random.uniform(1, 3)
+                    )
+
             print("Burst complete.")
 
         except discord.Forbidden as error:
-            print(f"Discord rejected the DM: {error}")
+            print(
+                f"Discord rejected the DM: {error}"
+            )
 
         except discord.HTTPException as error:
-            print(f"Discord HTTP error: {error}")
+            print(
+                f"Discord HTTP error: {error}"
+            )
 
         except Exception as error:
-            print(f"Unexpected error: {error}")
+            print(
+                f"Unexpected error: {error}"
+            )
 
         finally:
             await client.close()
@@ -88,61 +128,78 @@ async def send_mentions():
 
 
 def main():
-    now = get_current_time()
 
-    # Convert UTC to Chicago time.
-    # GitHub Actions runs in UTC, while your desired
-    # schedule is based on Chicago local time.
-    import zoneinfo
+    now_utc = datetime.now(timezone.utc)
+    now_chicago = now_utc.astimezone(CHICAGO)
 
-    chicago = zoneinfo.ZoneInfo("America/Chicago")
-    local_now = now.astimezone(chicago)
+    today = now_chicago.date()
 
-    today = local_now.date()
+    current_minutes = (
+        now_chicago.hour * 60
+        + now_chicago.minute
+    )
 
     schedule = generate_schedule(today)
 
     print(
         f"Today's Job Bot schedule "
-        f"({local_now.strftime('%Y-%m-%d')} Chicago time):"
+        f"({today} Chicago time):"
     )
 
-    for number, minutes in enumerate(schedule, start=1):
-        hour = minutes // 60
-        minute = minutes % 60
-
-        print(
-            f"  Burst {number}: "
-            f"{hour:02d}:{minute:02d}"
-        )
-
-    current_minutes = (
-        local_now.hour * 60
-        + local_now.minute
-    )
-
-    # GitHub will run this workflow every five minutes.
-    # Find out whether the current five-minute window
-    # contains one of today's scheduled times.
-    for burst_number, scheduled_minutes in enumerate(
+    for number, scheduled_time in enumerate(
         schedule,
         start=1
     ):
-        if (
-            scheduled_minutes
-            <= current_minutes
-            < scheduled_minutes + 5
-        ):
-            print(
-                f"Burst {burst_number} is due now."
+        print(
+            f"  Burst {number}: "
+            f"{format_time(scheduled_time)}"
+        )
+
+    print(
+        f"\nCurrent Chicago time: "
+        f"{now_chicago.strftime('%I:%M:%S %p')}"
+    )
+
+    # Find a burst that is currently due or was missed
+    # by up to MAX_LATE_MINUTES.
+    due_burst = None
+
+    for number, scheduled_time in enumerate(
+        schedule,
+        start=1
+    ):
+
+        difference = (
+            current_minutes - scheduled_time
+        )
+
+        if 0 <= difference <= MAX_LATE_MINUTES:
+            due_burst = (
+                number,
+                scheduled_time
             )
+            break
 
-            import asyncio
-            asyncio.run(send_mentions())
+    if due_burst is None:
+        print("\nNo burst is due right now.")
+        return
 
-            return
+    number, scheduled_time = due_burst
 
-    print("No burst is due right now.")
+    print(
+        f"\nBurst {number} is due!"
+    )
+
+    print(
+        f"Scheduled time: "
+        f"{format_time(scheduled_time)}"
+    )
+
+    print(
+        "Sending five mentions..."
+    )
+
+    asyncio.run(send_pings())
 
 
 if __name__ == "__main__":
