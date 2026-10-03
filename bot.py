@@ -1,267 +1,149 @@
 import os
 import random
-import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import discord
-from dotenv import load_dotenv
 
-load_dotenv()
+TOKEN = os.environ["DISCORD_TOKEN"]
+FRIEND_ID = int(os.environ["FRIEND_ID"])
 
-TOKEN = os.getenv("DISCORD_TOKEN")
-FRIEND_ID = int(os.getenv("FRIEND_ID"))
+START_HOUR = 4
+END_HOUR = 23
 
-# Daily active window
-START_HOUR = 4    # 4:00 AM
-END_HOUR = 23     # 11:00 PM
-
-# Schedule settings
 BURSTS_PER_DAY = 4
 PINGS_PER_BURST = 5
 
-# Delay between individual mentions
-MIN_PING_DELAY = 1
-MAX_PING_DELAY = 3
 
-# Minimum time between daily bursts
-MIN_BURST_GAP = 60 * 60  # 1 hour
+def generate_schedule(day):
+    """Generate four deterministic random times for a particular day."""
 
+    seed = int(day.strftime("%Y%m%d"))
+    rng = random.Random(seed)
 
-intents = discord.Intents.default()
-
-client = discord.Client(intents=intents)
-
-
-def generate_times():
-    """
-    Generate four random times between 4:00 AM and 11:00 PM.
-    Times are at least one hour apart.
-    """
-
-    now = datetime.now()
-
-    start = now.replace(
-        hour=START_HOUR,
-        minute=0,
-        second=0,
-        microsecond=0
-    )
-
-    end = now.replace(
-        hour=END_HOUR,
-        minute=0,
-        second=0,
-        microsecond=0
-    )
-
-    # If the entire window has passed,
-    # generate tomorrow's schedule.
-    if now >= end:
-        start += timedelta(days=1)
-        end += timedelta(days=1)
-
-    # Pick random minute positions.
-    possible_minutes = int(
-        (end - start).total_seconds() / 60
-    )
+    start_minutes = START_HOUR * 60
+    end_minutes = END_HOUR * 60
 
     while True:
-        selected_minutes = sorted(
-            random.sample(
-                range(possible_minutes),
+        minutes = sorted(
+            rng.sample(
+                range(start_minutes, end_minutes),
                 BURSTS_PER_DAY
             )
         )
 
-        # Make sure every burst is at least
-        # one hour away from the next.
         if all(
-            selected_minutes[i + 1] - selected_minutes[i]
-            >= 60
+            minutes[i + 1] - minutes[i] >= 60
             for i in range(BURSTS_PER_DAY - 1)
         ):
-            break
-
-    return [
-        start + timedelta(minutes=minute)
-        for minute in selected_minutes
-    ]
+            return minutes
 
 
-async def send_pings(friend):
-    """
-    Send five separate mentions of the target friend.
-    """
+def get_current_time():
+    """Return current UTC time."""
 
-    mention = f"<@{FRIEND_ID}>"
+    return datetime.now(timezone.utc)
 
-    print(
-        f"\nSending {PINGS_PER_BURST} mentions at "
-        f"{datetime.now().strftime('%I:%M:%S %p')}"
-    )
 
-    for number in range(1, PINGS_PER_BURST + 1):
+async def send_mentions():
+    """Log in, DM the friend five times, then disconnect."""
+
+    intents = discord.Intents.default()
+
+    client = discord.Client(intents=intents)
+
+    @client.event
+    async def on_ready():
+        print(f"Job Bot is online as {client.user}")
 
         try:
-            await friend.send(mention)
+            friend = await client.fetch_user(FRIEND_ID)
 
-            print(
-                f"  Sent mention "
-                f"{number}/{PINGS_PER_BURST}"
-            )
+            print(f"Target friend: {friend}")
+
+            mention = f"<@{FRIEND_ID}>"
+
+            for number in range(1, PINGS_PER_BURST + 1):
+                await friend.send(mention)
+
+                print(
+                    f"Sent mention "
+                    f"{number}/{PINGS_PER_BURST}"
+                )
+
+            print("Burst complete.")
 
         except discord.Forbidden as error:
-            print(
-                f"  Discord rejected the DM: {error}"
-            )
-            return
+            print(f"Discord rejected the DM: {error}")
 
         except discord.HTTPException as error:
-            print(
-                f"  Discord HTTP error: {error}"
-            )
-            return
+            print(f"Discord HTTP error: {error}")
 
         except Exception as error:
-            print(
-                f"  Unexpected error: {error}"
-            )
-            return
+            print(f"Unexpected error: {error}")
 
-        # Don't wait after the final message.
-        if number < PINGS_PER_BURST:
-            delay = random.uniform(
-                MIN_PING_DELAY,
-                MAX_PING_DELAY
-            )
+        finally:
+            await client.close()
 
-            await asyncio.sleep(delay)
+    await client.start(TOKEN)
 
 
-async def daily_scheduler():
-    """
-    Generate and execute a new schedule every day.
-    """
+def main():
+    now = get_current_time()
 
-    await client.wait_until_ready()
+    # Convert UTC to Chicago time.
+    # GitHub Actions runs in UTC, while your desired
+    # schedule is based on Chicago local time.
+    import zoneinfo
 
-    try:
-        friend = await client.fetch_user(FRIEND_ID)
-    except Exception as error:
+    chicago = zoneinfo.ZoneInfo("America/Chicago")
+    local_now = now.astimezone(chicago)
+
+    today = local_now.date()
+
+    schedule = generate_schedule(today)
+
+    print(
+        f"Today's Job Bot schedule "
+        f"({local_now.strftime('%Y-%m-%d')} Chicago time):"
+    )
+
+    for number, minutes in enumerate(schedule, start=1):
+        hour = minutes // 60
+        minute = minutes % 60
+
         print(
-            f"Could not find the target user: {error}"
+            f"  Burst {number}: "
+            f"{hour:02d}:{minute:02d}"
         )
-        return
 
-    print(f"Target friend: {friend}")
+    current_minutes = (
+        local_now.hour * 60
+        + local_now.minute
+    )
 
-    while not client.is_closed():
-
-        times = generate_times()
-
-        print("\nToday's Job Bot schedule:")
-
-        for number, target_time in enumerate(
-            times,
-            start=1
+    # GitHub will run this workflow every five minutes.
+    # Find out whether the current five-minute window
+    # contains one of today's scheduled times.
+    for burst_number, scheduled_minutes in enumerate(
+        schedule,
+        start=1
+    ):
+        if (
+            scheduled_minutes
+            <= current_minutes
+            < scheduled_minutes + 5
         ):
             print(
-                f"  Burst {number}: "
-                f"{target_time.strftime('%I:%M:%S %p')}"
+                f"Burst {burst_number} is due now."
             )
 
-        print()
+            import asyncio
+            asyncio.run(send_mentions())
 
-        # Go through today's scheduled times.
-        for target_time in times:
+            return
 
-            seconds_until = (
-                target_time - datetime.now()
-            ).total_seconds()
-
-            # Skip anything that has already passed.
-            if seconds_until <= 0:
-                print(
-                    f"Skipping "
-                    f"{target_time.strftime('%I:%M:%S %p')} "
-                    f"(already passed)."
-                )
-                continue
-
-            print(
-                f"Next burst in "
-                f"{seconds_until / 3600:.2f} hours."
-            )
-
-            await asyncio.sleep(seconds_until)
-
-            await send_pings(friend)
-
-        # Wait until after midnight before
-        # generating the next day's schedule.
-        now = datetime.now()
-
-        tomorrow = (
-            now + timedelta(days=1)
-        ).replace(
-            hour=0,
-            minute=0,
-            second=5,
-            microsecond=0
-        )
-
-        seconds_until_tomorrow = (
-            tomorrow - datetime.now()
-        ).total_seconds()
-
-        print(
-            "\nToday's schedule is finished."
-        )
-
-        print(
-            f"Generating tomorrow's schedule in "
-            f"{seconds_until_tomorrow / 3600:.2f} hours."
-        )
-
-        await asyncio.sleep(
-            max(seconds_until_tomorrow, 1)
-        )
+    print("No burst is due right now.")
 
 
-@client.event
-async def on_ready():
-
-    print(
-        f"Job Bot is online as {client.user}"
-    )
-
-    # Only start one scheduler.
-    if not hasattr(
-        client,
-        "scheduler_started"
-    ):
-
-        client.scheduler_started = True
-
-        asyncio.create_task(
-            daily_scheduler()
-        )
-
-
-if not TOKEN:
-    print(
-        "ERROR: DISCORD_TOKEN is missing "
-        "from your .env file."
-    )
-    raise SystemExit
-
-
-if not FRIEND_ID:
-    print(
-        "ERROR: FRIEND_ID is missing "
-        "from your .env file."
-    )
-    raise SystemExit
-
-
-client.run(TOKEN)
+if __name__ == "__main__":
+    main()
