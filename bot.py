@@ -16,8 +16,6 @@ END_HOUR = 23
 BURSTS_PER_DAY = 4
 PINGS_PER_BURST = 5
 
-MAX_LATE_MINUTES = 15
-
 STATE_FILE = "jobbot_state.txt"
 
 CHICAGO = ZoneInfo("America/Chicago")
@@ -65,8 +63,6 @@ def format_time(minutes):
 
 
 def load_state():
-    """Read the last successfully sent burst."""
-
     if not os.path.exists(STATE_FILE):
         return None
 
@@ -78,8 +74,6 @@ def load_state():
 
 
 def save_state(date_string, burst_number):
-    """Save the successfully sent burst."""
-
     with open(STATE_FILE, "w") as file:
         file.write(f"{date_string}|{burst_number}\n")
 
@@ -90,8 +84,12 @@ async def send_pings():
     intents = discord.Intents.default()
     client = discord.Client(intents=intents)
 
+    success = False
+
     @client.event
     async def on_ready():
+        nonlocal success
+
         print(f"Job Bot is online as {client.user}")
 
         try:
@@ -116,24 +114,23 @@ async def send_pings():
 
             print("Burst complete.")
 
-            return True
+            success = True
 
         except discord.Forbidden as error:
             print(f"Discord rejected the DM: {error}")
-            return False
 
         except discord.HTTPException as error:
             print(f"Discord HTTP error: {error}")
-            return False
 
         except Exception as error:
             print(f"Unexpected error: {error}")
-            return False
 
         finally:
             await client.close()
 
     await client.start(TOKEN)
+
+    return success
 
 
 def main():
@@ -173,33 +170,31 @@ def main():
     state = load_state()
 
     if state:
-        print(f"Last successful burst: {state}")
+        print(f"\nLast successful burst: {state}")
     else:
-        print("No burst has been recorded yet today.")
+        print("\nNo burst has been recorded yet today.")
 
-    due_burst = None
+    # Find the latest scheduled burst that has already
+    # happened today.
+    latest_due = None
 
     for number, scheduled_time in enumerate(
         schedule,
         start=1
     ):
-
-        difference = current_minutes - scheduled_time
-
-        if 0 <= difference <= MAX_LATE_MINUTES:
-            due_burst = (
+        if scheduled_time <= current_minutes:
+            latest_due = (
                 number,
                 scheduled_time
             )
-            break
 
-    if due_burst is None:
-        print("\nNo burst is due right now.")
+    if latest_due is None:
+        print("\nNo burst is due yet.")
         return
 
-    burst_number, scheduled_time = due_burst
+    burst_number, scheduled_time = latest_due
 
-    # Prevent the same burst from being sent twice.
+    # If this exact burst was already sent, do nothing.
     if state == f"{date_string}|{burst_number}":
         print(
             f"\nBurst {burst_number} was already sent today."
